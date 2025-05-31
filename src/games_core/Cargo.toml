@@ -1,0 +1,30 @@
+[package]
+name = "games_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+futures = { workspace = true }
+headless_chrome = { workspace = true }
+log = { workspace = true }
+prost = { workspace = true }
+quick-xml = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+scraper = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+thirtyfour = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "fs",
+  "time",
+  "process",
+] }
+
+games_proto = { path = "../games_proto" }

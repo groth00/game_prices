@@ -1,0 +1,19 @@
+[package]
+name = "games_cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "process", "time"] }
+
+games_core = { path = "../games_core" }

@@ -1,0 +1,16 @@
+/target
+
+.cargo/
+.venv/
+downloaded_files/
+output/
+sitemaps/
+temp/
+__pycache__/
+
+.DS_Store
+.env
+
+flamegraph*.svg
+games.db
+todo.txt
