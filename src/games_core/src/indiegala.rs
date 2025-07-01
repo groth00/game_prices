@@ -107,9 +107,6 @@ pub async fn parse_files() -> Result<(), Error> {
 
     for dir in ["all", "on_sale"] {
         let subdir = PathBuf::from(OUTPUT_DIR).join(dir);
-        if subdir.iter().count() == 0 {
-            continue;
-        }
 
         let mut entries = fs::read_dir(subdir).await?;
         let mut files = vec![];
@@ -121,12 +118,19 @@ pub async fn parse_files() -> Result<(), Error> {
             if let Some(extension) = path.extension() {
                 if extension == "xml" {
                     files.push(entry.path());
-                    info!("processing {:?}", entry.file_name());
-                    let xml = fs::read_to_string(entry.path()).await?;
-                    parse_xml(&xml, &mut output)?;
                 } else {
-                    info!("skipping {:?}", entry.file_name());
+                    info!("skip {:?}", entry.file_name());
                 }
+            }
+        }
+
+        if files.is_empty() {
+            continue;
+        } else {
+            for path in &files {
+                info!("processing {:?}", path.file_name());
+                let xml = fs::read_to_string(path).await?;
+                parse_xml(&xml, &mut output)?;
             }
         }
 
@@ -269,7 +273,7 @@ pub struct PriceInfo {
     pub release_date: String,
     pub available: String,
     pub unavailable_regions: Vec<String>,
-    pub is_dlc: String,
+    pub is_dlc: String, // NOTE: this is not a binary value, skip insertion
     pub drm_info: DrmInfo,
 }
 

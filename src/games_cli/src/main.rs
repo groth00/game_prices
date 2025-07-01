@@ -13,11 +13,11 @@ use tokio::{
 use games_core::{
     fanatical::Fanatical,
     gamebillet::Gamebillet,
-    gmg::Gmg,
-    gog::Gog,
+    gmg::{self, Gmg},
+    gog::{self, Gog},
     indiegala::{self},
     steam::Steam,
-    wgs::Wgs,
+    wgs::{self, Wgs},
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -32,15 +32,9 @@ async fn main() -> Result<(), Error> {
         Commands::Steam { action } => {
             let steam = Steam::default();
             match action {
-                SteamCmd::Apps => {
-                    steam.fetch_appids().await?;
-                }
-                SteamCmd::AppInfo => {
-                    steam.fetch_appinfo().await?;
-                }
-                SteamCmd::Bundles => {
-                    steam.bundles().await?;
-                }
+                SteamCmd::Apps => steam.fetch_appids().await?,
+                SteamCmd::AppInfo => steam.fetch_appinfo().await?,
+                SteamCmd::Bundles => steam.bundles().await?,
                 SteamCmd::Charts => {
                     info!("STEAM: fetching top_releases");
                     steam.top_releases().await?;
@@ -65,63 +59,45 @@ async fn main() -> Result<(), Error> {
                     info!("STEAM: fetching weekly_top");
                     steam.weekly_top(None).await?;
                 }
-                SteamCmd::ComingSoon => {
-                    steam.coming_soon().await?;
-                }
+                SteamCmd::ComingSoon => steam.coming_soon().await?,
                 SteamCmd::Ids => {
                     steam.tags().await?;
                     steam.categories().await?;
                 }
-                SteamCmd::MostWishlisted => {
-                    steam.most_wishlisted().await?;
-                }
-                SteamCmd::News => {
-                    steam.news(1604030).await?;
-                }
-                SteamCmd::OnSale => {
-                    steam.on_sale().await?;
-                }
-                SteamCmd::Wishlist => {
-                    steam.wishlist(false).await?;
-                }
-                SteamCmd::WishlistOnSale => {
-                    steam.wishlist(true).await?;
-                }
+                SteamCmd::MostWishlisted => steam.most_wishlisted().await?,
+                SteamCmd::News { appid } => steam.news(*appid).await?,
+                SteamCmd::OnSale => steam.on_sale().await?,
+                SteamCmd::Wishlist => steam.wishlist(false).await?,
+                SteamCmd::WishlistOnSale => steam.wishlist(true).await?,
             }
         }
         Commands::Fanatical { action } => {
             let fanatical = Fanatical::default();
             match action {
-                FanaticalCmd::Bundles => {
-                    fanatical.bundles().await?;
-                }
-                FanaticalCmd::OnSale => {
-                    fanatical.on_sale().await?;
-                }
-                FanaticalCmd::Sitemaps => {
-                    fanatical.sitemaps().await?;
-                }
+                FanaticalCmd::Bundles => fanatical.bundles().await?,
+                FanaticalCmd::OnSale => fanatical.download(true).await?,
+                FanaticalCmd::All => fanatical.download(false).await?,
+                FanaticalCmd::New => fanatical.new_releases().await?,
+                FanaticalCmd::Sitemaps => fanatical.sitemaps().await?,
             }
         }
         Commands::Indiegala { action } => match action {
-            IndiegalaCmd::All => {
-                run_python(Retailer::IndiegalaAll).await?;
-            }
-            IndiegalaCmd::OnSale => {
-                run_python(Retailer::IndiegalaSale).await?;
-            }
-            IndiegalaCmd::Bundles => {
-                run_python(Retailer::IndiegalaBundles).await?;
-            }
-            IndiegalaCmd::Parse => {
-                indiegala::parse_files().await?;
-            }
+            IndiegalaCmd::All => run_python(Retailer::IndiegalaAll).await?,
+            IndiegalaCmd::OnSale => run_python(Retailer::IndiegalaSale).await?,
+            IndiegalaCmd::Bundles => run_python(Retailer::IndiegalaBundles).await?,
+            IndiegalaCmd::Parse => indiegala::parse_files().await?,
         },
         Commands::Wingamestore { action } => {
             let wgs = Wgs::default();
             match action {
                 WingamestoreCmd::OnSale => {
-                    run_with_chromedriver(|| wgs.on_sale()).await?;
+                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::OnSale)).await?
+                }
+                WingamestoreCmd::All => {
+                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::All)).await?
+                }
+                WingamestoreCmd::New => {
+                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::New)).await?
                 }
             }
         }
@@ -129,31 +105,40 @@ async fn main() -> Result<(), Error> {
             let gog = Gog::default();
             match action {
                 GogCmd::OnSale => {
-                    run_with_chromedriver(|| gog.on_sale()).await?;
+                    gog.download(gog::ProductType::All, gog::DownloadKind::Discounted)
+                        .await?
+                }
+                GogCmd::All => {
+                    gog.download(gog::ProductType::GamePack, gog::DownloadKind::NotDiscounted)
+                        .await?;
+                    gog.download(
+                        gog::ProductType::DlcExtras,
+                        gog::DownloadKind::NotDiscounted,
+                    )
+                    .await?;
+                }
+                GogCmd::New => {
+                    gog.download(gog::ProductType::All, gog::DownloadKind::New)
+                        .await?
                 }
             }
         }
         Commands::Gamebillet { action } => match action {
-            GamebilletCmd::OnSale => {
-                run_python(Retailer::Gamebillet).await?;
-            }
-            GamebilletCmd::ParseSitemap => {
-                Gamebillet::parse_sitemap().await?;
-            }
+            GamebilletCmd::OnSale => run_python(Retailer::GamebilletSale).await?,
+            GamebilletCmd::All => run_python(Retailer::GamebilletAll).await?,
+            GamebilletCmd::ParseSitemap => Gamebillet::parse_sitemap().await?,
         },
         Commands::Gmg { action } => {
             let gmg = Gmg::default();
 
             match action {
-                GmgCmd::OnSale => {
-                    gmg.on_sale().await?;
-                }
+                GmgCmd::OnSale => gmg.download(gmg::DownloadKind::OnSale).await?,
+                GmgCmd::All => gmg.download(gmg::DownloadKind::All).await?,
+                GmgCmd::New => gmg.download(gmg::DownloadKind::New).await?,
             }
         }
         Commands::Gamesplanet { action } => match action {
-            GamesplanetCmd::All => {
-                run_python(Retailer::Gamesplanet).await?;
-            }
+            GamesplanetCmd::All => run_python(Retailer::Gamesplanet).await?,
         },
     }
 
@@ -226,7 +211,8 @@ async fn run_python(retailer: Retailer) -> Result<(), Error> {
 }
 
 enum Retailer {
-    Gamebillet,
+    GamebilletSale,
+    GamebilletAll,
     Gamesplanet,
     IndiegalaSale,
     IndiegalaAll,
@@ -236,7 +222,8 @@ enum Retailer {
 impl Retailer {
     const fn args(&self) -> [&'static str; 2] {
         match self {
-            Self::Gamebillet => ["gamebillet", "--steam"],
+            Self::GamebilletSale => ["gamebillet", "--sale"],
+            Self::GamebilletAll => ["gamebillet", "--all"],
             Self::Gamesplanet => ["gamesplanet", "--steam"],
             Self::IndiegalaSale => ["indiegala", "--sale"],
             Self::IndiegalaAll => ["indiegala", "--all"],
@@ -312,7 +299,7 @@ enum SteamCmd {
     /// download info of most wishlisted upcoming games
     MostWishlisted,
     /// download news for an app
-    News,
+    News { appid: u64 },
     /// download info on all discounted games
     OnSale,
     /// download info of all games on wishlist
@@ -328,8 +315,12 @@ enum FanaticalCmd {
     Sitemaps,
     /// fetch prices for all games on sale
     OnSale,
+    /// fetch prices for all games
+    All,
     /// fetch prices and info for all bundles
     Bundles,
+    /// get new titles since previous run of New/All
+    New,
 }
 
 #[derive(Subcommand)]
@@ -348,18 +339,29 @@ enum IndiegalaCmd {
 enum WingamestoreCmd {
     /// fetch prices for all games on sale
     OnSale,
+    /// fetch prices for all games
+    All,
+    /// fetch info on new releases
+    New,
 }
 
 #[derive(Subcommand)]
 enum GogCmd {
     /// fetch prices for all games on sale
     OnSale,
+    /// fetches all games by iterating over game, pack, dlc, extras
+    All,
+    /// fetches info on new games
+    New,
 }
 
 #[derive(Subcommand)]
 enum GamebilletCmd {
-    /// fetch prices for all games on sale
+    /// fetch from /hotdeals
     OnSale,
+    /// fetch from /allproducts
+    All,
+    /// todo
     ParseSitemap,
 }
 
@@ -367,6 +369,10 @@ enum GamebilletCmd {
 enum GmgCmd {
     /// fetch prices for all games on sale
     OnSale,
+    /// fetch prices for all games
+    All,
+    /// fetch info on new releases
+    New,
 }
 
 #[derive(Subcommand)]

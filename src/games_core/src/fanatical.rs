@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::algolia::{OnSaleState, ParamsBuilder};
+use crate::algolia::{Downloader, DownloaderSingleIndex, ParamsBuilder};
 use anyhow::Error;
 use chrono::{DateTime, Utc};
 use headless_chrome::{
@@ -33,7 +33,6 @@ const USER_AGENT: &str = "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.
 const OUTPUT_DIR: &str = "output/fanatical";
 
 // NOTE: more pages of interest
-// /new-releases
 // /upcoming-games
 // /top-sellers
 // /latest-deals
@@ -42,133 +41,6 @@ const OUTPUT_DIR: &str = "output/fanatical";
 pub struct Fanatical {
     links: Links,
     client: Client,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct AlgoliaHit {
-    pub name: String,
-    pub r#type: ItemType,
-    pub discount_percent: u64,
-    pub best_ever: bool,
-    pub flash_sale: bool,
-    pub price: Prices,
-    #[serde(rename = "fullPrice")]
-    pub full_price: Prices,
-    pub available_valid_from: u32,
-    pub available_valid_until: u32,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ItemType {
-    Dlc,
-    Game,
-}
-
-impl From<&str> for ItemType {
-    fn from(value: &str) -> Self {
-        match value {
-            "dlc" => Self::Dlc,
-            "game" => Self::Game,
-            _ => unreachable!(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Prices {
-    #[serde(rename = "USD")]
-    pub usd: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct AlgoliaHeaders {
-    #[serde(alias = "x-algolia-agent")]
-    agent: String,
-    #[serde(alias = "x-algolia-api-key")]
-    api_key: String,
-    #[serde(alias = "x-algolia-application-id")]
-    application_id: String,
-}
-
-#[derive(Debug, Default)]
-struct XhrInterceptor {
-    captured_url: Arc<Mutex<String>>,
-}
-
-impl RequestInterceptor for XhrInterceptor {
-    fn intercept(
-        &self,
-        _tr: Arc<Transport>,
-        _id: SessionId,
-        ev: RequestPausedEvent,
-    ) -> RequestPausedDecision {
-        // info!("{:?}", ev.params);
-        if ev.params.resource_Type == ResourceType::Xhr {
-            let url = &ev.params.request.url;
-            // let headers = &ev.params.request.headers;
-
-            // info!("XHR request sent to: {}", url);
-            // info!("request headers: {:?}", headers);
-
-            if let Ok(mut lock) = self.captured_url.lock() {
-                *lock = url.clone();
-            }
-        }
-
-        let headers_convert = ev.params.request.headers.0.unwrap().as_object().map(|map| {
-            map.iter()
-                .filter_map(|(key, val)| {
-                    val.as_str().map(|v| HeaderEntry {
-                        name: key.clone(),
-                        value: v.to_string(),
-                    })
-                })
-                .collect()
-        });
-
-        RequestPausedDecision::Continue(Some(ContinueRequest {
-            request_id: ev.params.request_id,
-            url: Some(ev.params.request.url),
-            method: Some(ev.params.request.method),
-            post_data: ev.params.request.post_data,
-            headers: headers_convert,
-            intercept_response: Some(true),
-        }))
-    }
-}
-
-/// Use headless_chrome to extract headers from XHR request made to Algolia
-async fn get_algolia_headers() -> Result<AlgoliaHeaders, Error> {
-    let browser = Browser::default()?;
-    let tab = browser.new_tab()?;
-
-    let patterns = vec![Fetch::RequestPattern {
-        request_stage: Some(cdp::Fetch::RequestStage::Request),
-        resource_Type: Some(cdp::Network::ResourceType::Xhr),
-        url_pattern: Some("*w2m9492ddv-dsn.algolia.net*".into()),
-    }];
-
-    tab.call_method(Fetch::Enable {
-        patterns: Some(patterns),
-        handle_auth_requests: Some(false),
-    })?;
-
-    let captured_url = Arc::new(Mutex::new(String::new()));
-    let interceptor = Arc::new(XhrInterceptor {
-        captured_url: captured_url.clone(),
-    });
-    tab.enable_request_interception(interceptor.clone())?;
-
-    const URL: &str = "https://www.fanatical.com/en/search";
-    tab.navigate_to(URL)?.wait_until_navigated()?;
-
-    std::thread::sleep(Duration::from_secs(8));
-
-    let url = captured_url.lock().unwrap().clone();
-    let raw = url.split("?").nth(1).unwrap(); // query parameters
-    let headers: AlgoliaHeaders = serde_urlencoded::from_str(raw)?;
-    Ok(headers)
 }
 
 impl Default for Fanatical {
@@ -201,6 +73,24 @@ impl Default for Fanatical {
 }
 
 impl Fanatical {
+    const HEADERS_INTERCEPT_SEARCH_URL: &str = "https://www.fanatical.com/en/search";
+    const HEADERS_INTERCEPT_NEW_RELEASES_URL: &str = "https://www.fanatical.com/en/new-releases";
+
+    const ALGOLIA_URL: &str = "https://w2m9492ddv-dsn.algolia.net/1/indexes/*/queries";
+    const ALGOLIA_INDEX_NAME: &str = "fan_unlimited";
+
+    const NEW_RELEASES_URL: &str = "https://w2m9492ddv-dsn.algolia.net/1/indexes/fan/query";
+
+    const FACETS: &str = "[\"collections\",\"display_type\",\"drm\",\"features\",\"genresSlug\",\"languages\",\"on_sale\",\"operating_systems\",\"playstylesSlug\",\"price.USD\",\"publishers\",\"steam_deck_support\",\"themesSlug\",\"vr_support\"]";
+    const FACET_FILTERS_GAMES_ON_SALE: &str =
+        "[[\"display_type:game\"],[\"drm:steam\"],[\"languages:English\"],[\"on_sale:true\"]]";
+    const FACET_FILTERS_GAMES: &str =
+        "[[\"display_type:game\"],[\"drm:steam\"],[\"languages:English\"]]";
+    const FACET_FILTERS_DLC_ON_SALE: &str =
+        "[[\"display_type:dlc\"],[\"drm:steam\"],[\"languages:English\"],[\"on_sale:true\"]]";
+    const FACET_FILTERS_DLC: &str =
+        "[[\"display_type:dlc\"],[\"drm:steam\"],[\"languages:English\"]]";
+
     pub async fn sitemaps(&self) -> Result<(), Error> {
         fs::create_dir_all(OUTPUT_DIR).await?;
         let output_dir = PathBuf::from(OUTPUT_DIR);
@@ -266,13 +156,13 @@ impl Fanatical {
         Ok(())
     }
 
-    pub async fn on_sale(&self) -> Result<(), Error> {
+    pub async fn new_releases(&self) -> Result<(), Error> {
         fs::create_dir_all(OUTPUT_DIR).await?;
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let output_path = PathBuf::from(OUTPUT_DIR).join(format!("on_sale_{}.json", now));
+        let output_path = PathBuf::from(OUTPUT_DIR).join(format!("new_{}.json", now));
 
-        let algolia_headers = get_algolia_headers().await?;
+        let algolia_headers = get_algolia_headers(Self::HEADERS_INTERCEPT_NEW_RELEASES_URL).await?;
 
         let mut headers = HeaderMap::new();
 
@@ -286,7 +176,47 @@ impl Fanatical {
             algolia_headers.application_id.parse().unwrap(),
         );
 
-        let url = "https://w2m9492ddv-dsn.algolia.net/1/indexes/*/queries";
+        let mut params = ParamsBuilder::default();
+
+        params.hits_per_page(36).fanatical_date_filter().page(0);
+
+        let mut dl = DownloaderSingleIndex {
+            output_path,
+            headers,
+            url: Self::NEW_RELEASES_URL,
+            client: &self.client,
+            params: params,
+        };
+
+        dl.download::<AlgoliaHit>().await?;
+
+        Ok(())
+    }
+
+    pub async fn download(&self, on_sale: bool) -> Result<(), Error> {
+        fs::create_dir_all(OUTPUT_DIR).await?;
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+        let output_path = if on_sale {
+            PathBuf::from(OUTPUT_DIR).join(format!("on_sale_{}.json", now))
+        } else {
+            PathBuf::from(OUTPUT_DIR).join(format!("all_{}.json", now))
+        };
+
+        let algolia_headers = get_algolia_headers(Self::HEADERS_INTERCEPT_SEARCH_URL).await?;
+
+        let mut headers = HeaderMap::new();
+
+        headers.insert("x-algolia-agent", algolia_headers.agent.parse().unwrap());
+        headers.insert(
+            "x-algolia-api-key",
+            algolia_headers.api_key.parse().unwrap(),
+        );
+        headers.insert(
+            "x-algolia-application-id",
+            algolia_headers.application_id.parse().unwrap(),
+        );
 
         let price_filters = [
             "[\"price.USD>=30\"]",
@@ -304,37 +234,175 @@ impl Fanatical {
         // NOTE: hits_per_page is capped at 100 for this index specifically
         let mut params_games = ParamsBuilder::default();
         params_games
-        .facet_filters("[[\"display_type:game\"],[\"drm:steam\"],[\"languages:English\"],[\"on_sale:true\"]]")
-        .facets("[\"collections\",\"display_type\",\"drm\",\"features\",\"genresSlug\",\"languages\",\"on_sale\",\"operating_systems\",\"playstylesSlug\",\"price.USD\",\"publishers\",\"steam_deck_support\",\"themesSlug\",\"vr_support\"]")
-        .hits_per_page(100)
-        .max_values_per_facet(50)
-        .faceting_after_distinct(true);
+            .facets(Self::FACETS)
+            .hits_per_page(100)
+            .max_values_per_facet(50)
+            .faceting_after_distinct(true);
 
         let mut params_dlc = ParamsBuilder::default();
         params_dlc
-        .facet_filters("[[\"display_type:dlc\"],[\"drm:steam\"],[\"languages:English\"],[\"on_sale:true\"]]")
-        .facets("[\"collections\",\"display_type\",\"drm\",\"features\",\"genresSlug\",\"languages\",\"on_sale\",\"operating_systems\",\"playstylesSlug\",\"price.USD\",\"publishers\",\"steam_deck_support\",\"themesSlug\",\"vr_support\"]")
-        .hits_per_page(100)
-        .max_values_per_facet(50)
-        .faceting_after_distinct(true);
+            .facets(Self::FACETS)
+            .hits_per_page(100)
+            .max_values_per_facet(50)
+            .faceting_after_distinct(true);
 
-        let algolia_index_name = "fan_unlimited";
+        if on_sale {
+            params_games.facet_filters(Self::FACET_FILTERS_GAMES_ON_SALE);
+            params_dlc.facet_filters(Self::FACET_FILTERS_DLC_ON_SALE);
+        } else {
+            params_games.facet_filters(Self::FACET_FILTERS_GAMES);
+            params_dlc.facet_filters(Self::FACET_FILTERS_DLC);
+        }
 
-        let mut state = OnSaleState {
+        let mut dl = Downloader {
             output_path,
             headers,
-            url,
+            url: Self::ALGOLIA_URL,
             client: &self.client,
-            price_filters: price_filters.to_vec(),
+            price_filters: &price_filters,
             params_games,
             params_dlc,
-            algolia_index_name,
+            algolia_index_name: Self::ALGOLIA_INDEX_NAME,
         };
 
-        state.algolia_on_sale::<AlgoliaHit>().await?;
+        dl.download::<AlgoliaHit>().await?;
 
         Ok(())
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct AlgoliaHeaders {
+    #[serde(alias = "x-algolia-agent")]
+    agent: String,
+    #[serde(alias = "x-algolia-api-key")]
+    api_key: String,
+    #[serde(alias = "x-algolia-application-id")]
+    application_id: String,
+}
+
+#[derive(Debug, Default)]
+struct XhrInterceptor {
+    captured_url: Arc<Mutex<String>>,
+}
+
+impl RequestInterceptor for XhrInterceptor {
+    fn intercept(
+        &self,
+        _tr: Arc<Transport>,
+        _id: SessionId,
+        ev: RequestPausedEvent,
+    ) -> RequestPausedDecision {
+        // info!("{:?}", ev.params);
+        if ev.params.resource_Type == ResourceType::Xhr {
+            let url = &ev.params.request.url;
+            // let headers = &ev.params.request.headers;
+
+            // info!("XHR request sent to: {}", url);
+            // info!("request headers: {:?}", headers);
+
+            if let Ok(mut lock) = self.captured_url.lock() {
+                *lock = url.clone();
+            }
+        }
+
+        let headers_convert = ev.params.request.headers.0.unwrap().as_object().map(|map| {
+            map.iter()
+                .filter_map(|(key, val)| {
+                    val.as_str().map(|v| HeaderEntry {
+                        name: key.clone(),
+                        value: v.to_string(),
+                    })
+                })
+                .collect()
+        });
+
+        RequestPausedDecision::Continue(Some(ContinueRequest {
+            request_id: ev.params.request_id,
+            url: Some(ev.params.request.url),
+            method: Some(ev.params.request.method),
+            post_data: ev.params.request.post_data,
+            headers: headers_convert,
+            intercept_response: Some(true),
+        }))
+    }
+}
+
+/// Use headless_chrome to extract headers from XHR request made to Algolia
+async fn get_algolia_headers(url: &'static str) -> Result<AlgoliaHeaders, Error> {
+    let browser = Browser::default()?;
+    let tab = browser.new_tab()?;
+
+    let patterns = vec![Fetch::RequestPattern {
+        request_stage: Some(cdp::Fetch::RequestStage::Request),
+        resource_Type: Some(cdp::Network::ResourceType::Xhr),
+        url_pattern: Some("*w2m9492ddv-dsn.algolia.net*".into()),
+    }];
+
+    tab.call_method(Fetch::Enable {
+        patterns: Some(patterns),
+        handle_auth_requests: Some(false),
+    })?;
+
+    let captured_url = Arc::new(Mutex::new(String::new()));
+    let interceptor = Arc::new(XhrInterceptor {
+        captured_url: captured_url.clone(),
+    });
+    tab.enable_request_interception(interceptor.clone())?;
+
+    tab.navigate_to(url)?.wait_until_navigated()?;
+
+    std::thread::sleep(Duration::from_secs(8));
+
+    let url = captured_url.lock().unwrap().clone();
+    let raw = url.split("?").nth(1).unwrap(); // query parameters
+    let headers: AlgoliaHeaders = serde_urlencoded::from_str(raw)?;
+    Ok(headers)
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AlgoliaHit {
+    pub name: String,
+    pub r#type: ItemType,
+    pub discount_percent: u64,
+    pub best_ever: bool,
+    pub flash_sale: bool,
+    pub price: Prices,
+    #[serde(rename = "fullPrice")]
+    pub full_price: Prices,
+    pub operating_systems: Vec<String>,
+    pub drm: Vec<String>,
+    pub features: Vec<String>,
+    pub categories: Vec<String>,
+    pub available_valid_from: u64,
+    pub available_valid_until: u64,
+    pub release_date: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ItemType {
+    Dlc,
+    Game,
+    Bundle,
+}
+
+impl From<&str> for ItemType {
+    fn from(value: &str) -> Self {
+        match value {
+            "dlc" => Self::Dlc,
+            "game" => Self::Game,
+            "bundle" => Self::Bundle,
+            _ => unreachable!(),
+        }
+    }
+}
+
+// NOTE: fanatical sets prices of unreleased games to 0.0
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Prices {
+    #[serde(rename = "USD")]
+    pub usd: Option<f64>,
 }
 
 async fn parse_entities(input_path: PathBuf, output_name: &str) -> Result<(), Error> {

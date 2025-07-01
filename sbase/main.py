@@ -21,7 +21,10 @@ def parse_args() -> argparse.Namespace:
 
     gamebillet = subparsers.add_parser("gamebillet")
     gamebillet.add_argument(
-        "--steam", action="store_true", help="get all items with steam drm"
+        "--all", action="store_true", help="get all steam items from /allproducts"
+    )
+    gamebillet.add_argument(
+        "--sale", action="store_true", help="get all steam items from /hotdeals"
     )
     gamebillet.set_defaults(func=do_gamebillet)
 
@@ -54,8 +57,11 @@ def do_gamebillet(args: argparse.Namespace):
 
     gamebillet = Gamebillet()
     if args.sale:
-        print("--steam")
-        gamebillet.steam()
+        print("--sale")
+        gamebillet.on_sale()
+    if args.all:
+        print("--all")
+        gamebillet.all()
 
 
 def do_gamesplanet(args: argparse.Namespace):

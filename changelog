@@ -1,0 +1,34 @@
+## 2025-07-01
+
+### Notes
+- API downloaders: fanatical (algolia), gmg (algolia), gog, steam
+- HTML downloaders: gamebillet, gamesplanet, wgs
+- XML downloaders: indiegala
+
+### Added
+- disabled js and images for gamebillet and gamesplanet downloaders
+	- sidenote: tried playwright but the stealth plugin wasn't effective
+- process all files in importer instead of latest file only
+- automatically move files into backup dir after processing/importing for replay
+- import bundles for fanatical, steam, indiegala
+- added metadata to search table such as tags, categories, review score,
+platforms
+- add option for downloaders to fetch all items (not just items on sale)
+
+### Changed
+- organized importer code into cli, bundles, insert, utils
+- update Steam fetch_appinfo method to always write to a new file instead of
+truncating
+- update UpdateMetadata command to handle all relevant appinfo files
+- remove duplicate entries when importing prices
+- extracted queries from source code to files and use include_str!
+- updated importer to insert additional columns for each downloader except
+gamebillet and gamesplanet
+	- attributes differ between stores (publisher, release_date, franchise, etc.
+- adjusted price ranges for gmg downloader due to algolia limit of 1000
+results
+- updated importer to to skip unreleased games from fanatical
+- use API for gog downloader
+
+### Removed
+- thirtyfour download logic for gog

@@ -2,6 +2,7 @@ use std::{path::PathBuf, time::Duration};
 
 use crate::utils::retry;
 use anyhow::Error;
+use chrono::{Datelike, Local, TimeZone};
 use log::info;
 use reqwest::{Client, Method, header::HeaderMap};
 use serde::{Deserialize, Serialize};
@@ -12,31 +13,29 @@ use tokio::{
 };
 
 #[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ParamsBuilder {
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "ruleContexts")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     rule_contexts: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    filters: Option<&'static str>,
-    #[serde(rename = "hitsPerPage")]
+    filters: Option<String>,
     hits_per_page: u64,
-    #[serde(rename = "numericFilters")]
-    numeric_filters: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    numeric_filters: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     distinct: Option<bool>,
-    #[serde(rename = "maxValuesPerFacet")]
-    max_values_per_facet: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_values_per_facet: Option<u64>,
     pub page: u64,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "tagFilters")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     tag_filters: Option<&'static str>,
-    facets: &'static str,
-    #[serde(rename = "facetFilters")]
-    facet_filters: &'static str,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        rename = "facetingAfterDistinct"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facets: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    facet_filters: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     faceting_after_distinct: Option<bool>,
 }
 
@@ -45,7 +44,7 @@ impl ParamsBuilder {
         serde_urlencoded::to_string(&self).expect("failed to serialize params")
     }
 
-    pub fn _query(&mut self, s: &'static str) -> &mut Self {
+    pub fn query(&mut self, s: &'static str) -> &mut Self {
         self.query = Some(s);
         self
     }
@@ -56,7 +55,7 @@ impl ParamsBuilder {
     }
 
     pub fn filters(&mut self, s: &'static str) -> &mut Self {
-        self.filters = Some(s);
+        self.filters = Some(s.to_string());
         self
     }
 
@@ -66,7 +65,7 @@ impl ParamsBuilder {
     }
 
     pub fn numeric_filters(&mut self, s: &'static str) -> &mut Self {
-        self.numeric_filters = s;
+        self.numeric_filters = Some(s);
         self
     }
 
@@ -76,7 +75,7 @@ impl ParamsBuilder {
     }
 
     pub fn max_values_per_facet(&mut self, u: u64) -> &mut Self {
-        self.max_values_per_facet = u;
+        self.max_values_per_facet = Some(u);
         self
     }
 
@@ -91,12 +90,12 @@ impl ParamsBuilder {
     }
 
     pub fn facets(&mut self, s: &'static str) -> &mut Self {
-        self.facets = s;
+        self.facets = Some(s);
         self
     }
 
     pub fn facet_filters(&mut self, s: &'static str) -> &mut Self {
-        self.facet_filters = s;
+        self.facet_filters = Some(s);
         self
     }
 
@@ -104,11 +103,33 @@ impl ParamsBuilder {
         self.faceting_after_distinct = Some(b);
         self
     }
+
+    pub fn fanatical_date_filter(&mut self) -> &mut Self {
+        let now = Local::now();
+        let end = now.timestamp() as u32;
+        let adjusted = Local.with_ymd_and_hms(now.year(), now.month() - 3, now.day(), 0, 0, 0);
+        let start = adjusted
+            .single()
+            .expect("time zone mapping error")
+            .timestamp() as u32;
+
+        let formatted = format!(
+            "release_date > {} AND release_date < {} AND (display_type:game OR display_type:dlc)",
+            start, end
+        );
+        self.filters = Some(formatted);
+        self
+    }
 }
 
 #[derive(Debug, Serialize)]
-pub struct AlgoliaRequest {
+pub struct AlgoliaMultiRequest {
     pub requests: Vec<AlgoliaQuery>,
+}
+
+#[derive(Serialize)]
+pub struct AlgoliaRequest {
+    pub params: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,11 +140,10 @@ pub struct AlgoliaQuery {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct AlgoliaResponse<T> {
+pub struct AlgoliaMultiResponse<T> {
     pub results: Vec<AlgoliaResult<T>>,
 }
 
-// NOTE: exclude timing fields because they are not always present
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AlgoliaResult<T> {
     pub hits: Vec<T>,
@@ -136,21 +156,19 @@ pub struct AlgoliaResult<T> {
     pub hits_per_page: u64,
 }
 
-pub struct OnSaleState<'a> {
+pub struct Downloader<'a> {
     pub output_path: PathBuf,
     pub headers: HeaderMap,
     pub url: &'static str,
     pub client: &'a Client,
-    pub price_filters: Vec<&'static str>,
+    pub price_filters: &'a [&'static str],
     pub params_games: ParamsBuilder,
     pub params_dlc: ParamsBuilder,
     pub algolia_index_name: &'static str,
 }
 
-impl<'a> OnSaleState<'a> {
-    pub async fn algolia_on_sale<T: Serialize + for<'b> Deserialize<'b>>(
-        &mut self,
-    ) -> Result<(), Error> {
+impl<'a> Downloader<'a> {
+    pub async fn download<T: Serialize + for<'b> Deserialize<'b>>(&mut self) -> Result<(), Error> {
         let file = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -160,7 +178,7 @@ impl<'a> OnSaleState<'a> {
             .expect("failed to open output file");
         let mut writer = BufWriter::new(file);
 
-        for &filter_str in &self.price_filters {
+        for &filter_str in self.price_filters {
             info!("fetching for {}", filter_str);
             self.params_games.numeric_filters(filter_str);
             self.params_games.page(0);
@@ -197,7 +215,7 @@ impl<'a> OnSaleState<'a> {
 
                 info!("fetching page {}", self.params_games.page);
 
-                let body = AlgoliaRequest { requests: queries };
+                let body = AlgoliaMultiRequest { requests: queries };
 
                 let req = self
                     .client
@@ -209,7 +227,14 @@ impl<'a> OnSaleState<'a> {
 
                 let resp = retry(&self.client, req).await?;
 
-                let algolia = resp.json::<AlgoliaResponse<T>>().await?;
+                let algolia = resp.json::<AlgoliaMultiResponse<T>>().await?;
+
+                // NOTE: nb_hits == 0 doesn't work because nb_hits is the total
+                if !algolia.results.iter().all(|x| x.hits.is_empty()) {
+                    let ser = serde_json::to_string(&algolia)?;
+                    writer.write_all(ser.as_bytes()).await?;
+                    writer.write_u8(b'\n').await?;
+                }
 
                 if algolia.results.len() == 2 {
                     // results are returned in the same order as the requests (game 0, dlc 1)
@@ -241,10 +266,6 @@ impl<'a> OnSaleState<'a> {
                     break;
                 }
 
-                let ser = serde_json::to_string(&algolia)?;
-                writer.write_all(ser.as_bytes()).await?;
-                writer.write_u8(b'\n').await?;
-
                 if games_done && dlc_done {
                     break;
                 }
@@ -258,5 +279,80 @@ impl<'a> OnSaleState<'a> {
         writer.flush().await?;
 
         Ok(())
+    }
+}
+
+pub struct DownloaderSingleIndex<'a> {
+    pub output_path: PathBuf,
+    pub headers: HeaderMap,
+    pub url: &'static str,
+    pub client: &'a Client,
+    pub params: ParamsBuilder,
+}
+
+impl<'a> DownloaderSingleIndex<'a> {
+    pub async fn download<T: Serialize + std::fmt::Debug + for<'b> Deserialize<'b>>(
+        &mut self,
+    ) -> Result<(), Error> {
+        let file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&self.output_path)
+            .await
+            .expect("failed to open output file");
+        let mut writer = BufWriter::new(file);
+        self.params.page = 0;
+
+        loop {
+            info!("fetching page {}", self.params.page);
+
+            let req = self
+                .client
+                .request(Method::POST, self.url)
+                .headers(self.headers.clone())
+                .json(&self.params)
+                .build()
+                .expect("failed to build request");
+
+            let resp = retry(&self.client, req).await?;
+            let algolia = resp.json::<AlgoliaResult<T>>().await?;
+
+            let ser = serde_json::to_string(&algolia)?;
+            writer.write_all(ser.as_bytes()).await?;
+            writer.write_u8(b'\n').await?;
+
+            if algolia.page == algolia.nb_pages || algolia.hits.is_empty() {
+                break;
+            }
+
+            self.params.page += 1;
+            sleep(Duration::from_millis(1500)).await;
+        }
+
+        writer.flush().await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn date_range() {
+        let mut params = ParamsBuilder::default();
+
+        params.fanatical_date_filter();
+        params.page(0);
+        params.hits_per_page(36);
+
+        println!("{:?}", params.filters);
+        let serialized = serde_json::to_string(&params);
+        assert!(serialized.is_ok());
+
+        let serialized = serialized.unwrap();
+        println!("{:?}", serialized);
     }
 }

@@ -1,238 +1,364 @@
 use std::{
+    fmt::{self, Display, Formatter},
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Error;
-use futures::{
-    join,
-    stream::{FuturesUnordered, StreamExt},
-};
-use log::{error, info};
+use log::info;
+use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
-use thirtyfour::prelude::{ElementQueryable, ElementWaitable};
-use thirtyfour::{By, DesiredCapabilities, IntoArcStr, WebDriver, WebElement};
-use tokio::{fs, sync::Semaphore, time::sleep};
+use tokio::{
+    fs::OpenOptions,
+    io::{AsyncWriteExt, BufWriter},
+    time::sleep,
+};
 
-const CHROMEDRIVER_SERVER_URL: &str = "http://localhost:9515";
+use crate::utils::retry;
+
 const OUTPUT_DIR: &str = "output/gog";
 
 pub struct Gog {
-    links: Links<&'static str>,
-    selectors: Selectors<&'static str>,
+    client: Client,
 }
 
 impl Default for Gog {
     fn default() -> Self {
-        Self {
-            links: Links {
-                on_sale: "https://www.gog.com/en/games?languages=en&discounted=true",
-            },
-            selectors: Selectors {
-                cookies_btn: "CybotCookiebotDialogBodyButtonDecline",
-                total_items: "h1[selenium-id='pageHeader']",
-                total_pages: ".small-pagination__item[selenium-id='smallPaginationPage'] span",
-                content: "[selenium-id='catalogContent']",
-                items: ".paginated-products-grid .product-tile",
-                button: "[selenium-id='smallPaginationNext']",
+        let client = reqwest::ClientBuilder::new()
+            .tcp_keepalive(Duration::from_secs(30))
+            .https_only(true)
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("failed to build reqwest client");
 
-                name: "[selenium-id='productTileGameTitle']",
-                is_dlc: "[selenium-id='productTitleLabel']",
-                pct_discount: "[selenium-id='productPriceDiscount']",
-                original_price: "base-value",
-                price: "final-value",
-            },
-        }
+        Self { client }
     }
 }
 
 impl Gog {
-    pub async fn on_sale(&self) -> Result<(), Error> {
-        fs::create_dir_all(OUTPUT_DIR).await?;
+    pub async fn download(
+        &self,
+        product_type: ProductType,
+        download_kind: DownloadKind,
+    ) -> Result<(), Error> {
+        let mut params = QueryParams::default();
+        params
+            .product_type(&product_type)
+            .download_kind(&download_kind);
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-
-        let caps = DesiredCapabilities::chrome();
-        let driver = Arc::new(WebDriver::new(CHROMEDRIVER_SERVER_URL, caps).await?);
-
-        driver.goto(self.links.on_sale).await?;
-        sleep(Duration::from_millis(2000)).await;
-
-        if let Ok(button) = driver
-            .query(By::Id(self.selectors.cookies_btn))
-            .first()
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as u32;
+        let output_path = match download_kind {
+            DownloadKind::Discounted => {
+                PathBuf::from(OUTPUT_DIR).join(format!("on_sale_{}_{}.json", &product_type, now))
+            }
+            DownloadKind::NotDiscounted => {
+                PathBuf::from(OUTPUT_DIR).join(format!("{}_{}.json", &product_type, now))
+            }
+            DownloadKind::New => {
+                PathBuf::from(OUTPUT_DIR).join(format!("new_{}_{}.json", &product_type, now))
+            }
+        };
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_path)
             .await
-        {
-            button.click().await?;
-        } else {
-            panic!("could not decline cookies");
-        }
+            .expect("failed to open output file");
+        let mut writer = BufWriter::new(file);
 
-        let total_items = driver
-            .query(By::Css(self.selectors.total_items))
-            .first()
-            .await?
-            .text()
-            .await?;
-        info!("total_items: {}", total_items);
+        loop {
+            info!("on page {}", params.page);
+            let url = params.build_url();
+            sleep(Duration::from_millis(1000)).await;
+            let req = self.client.request(Method::GET, &url).build()?;
+            let resp = retry(&self.client, req).await?;
+            let output = resp.bytes().await?;
 
-        let total_pages = driver
-            .query(By::Css(self.selectors.total_pages))
-            .first()
-            .await?
-            .text()
-            .await?
-            .parse::<u64>()?;
+            writer.write_all(&output).await?;
+            writer.write_u8(b'\n').await?;
 
-        let mut output: Vec<PriceInfo> = Vec::with_capacity(2000);
-
-        let mut tasks = FuturesUnordered::new();
-        let semaphore = Arc::new(Semaphore::new(10));
-
-        for i in 1..=total_pages {
-            info!("scraping page {}", i);
-            sleep(Duration::from_millis(3000)).await;
-            driver
-                .query(By::Css(self.selectors.content))
-                .first()
-                .await?
-                .wait_until()
-                .displayed()
-                .await?;
-
-            let items = driver
-                .query(By::Css(self.selectors.items))
-                .all_from_selector()
-                .await?;
-
-            let start = Instant::now();
-            for item in items {
-                let semaphore = semaphore.clone();
-                item.wait_until().displayed().await?;
-                item.scroll_into_view().await?;
-                tasks.push(async move {
-                    let permit = semaphore.acquire_owned().await.unwrap();
-                    let result = self.extract(item).await;
-                    drop(permit);
-
-                    result
-                });
-            }
-
-            while let Some(res) = tasks.next().await {
-                match res {
-                    Ok(info) => output.push(info),
-                    Err(e) => error!("error: {}", e),
-                }
-            }
-            let end = Instant::now();
-            info!("processed page in {}", (end - start).as_secs_f64());
-
-            if let Ok(button) = driver
-                .query(By::Css(self.selectors.button))
-                .and_enabled()
-                .first()
-                .await
-            {
-                button.scroll_into_view().await?;
-                driver
-                    .execute(
-                        r#"document.querySelector('[selenium-id="paginationNext"]').click();"#,
-                        Vec::new(),
-                    )
-                    .await?;
-            } else {
+            let pagination: GogPagination = serde_json::from_slice(&output)?;
+            if pagination.pages == params.page {
                 break;
             }
+            if params.page == 1 {
+                info!(
+                    "total: {}, available: {}",
+                    pagination.product_count, pagination.currently_shown_product_count
+                );
+            }
+            params.page += 1;
         }
-
-        <WebDriver as Clone>::clone(&driver).quit().await?;
-
-        let serialized = serde_json::to_string(&output)?;
-        let output_dir = PathBuf::from(OUTPUT_DIR).join(format!("on_sale_{}.json", now));
-        fs::write(output_dir, serialized).await?;
+        writer.flush().await?;
 
         Ok(())
     }
+}
 
-    async fn extract(&self, elem: WebElement) -> Result<PriceInfo, Error> {
-        let name_fut = async {
-            elem.find(By::Css(self.selectors.name))
-                .await?
-                .attr("title")
-                .await
-        };
-        let dlc_fut = async {
-            match elem.find(By::Css(self.selectors.is_dlc)).await {
-                Ok(elem) => elem.text().await.expect("failed to get text of element") == "DLC",
-                Err(_e) => false,
-            }
-        };
-        let pct_fut = async {
-            elem.find(By::Css(self.selectors.pct_discount))
-                .await?
-                .text()
-                .await
-        };
-        let original_price_fut = async {
-            elem.find(By::ClassName(self.selectors.original_price))
-                .await?
-                .text()
-                .await
-        };
-        let price_fut = async {
-            elem.find(By::ClassName(self.selectors.price))
-                .await?
-                .text()
-                .await
-        };
+pub enum DownloadKind {
+    Discounted,
+    NotDiscounted,
+    New,
+}
 
-        let (name, is_dlc, percent_discount, original_price, price) =
-            join!(name_fut, dlc_fut, pct_fut, original_price_fut, price_fut);
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryParams {
+    limit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_statuses: Option<&'static str>,
+    languages: &'static str,
+    order: &'static str,
+    discounted: &'static str,
+    product_type: &'static str,
+    page: u64,
+    country_code: &'static str,
+    locale: &'static str,
+    currency_code: &'static str,
+}
 
-        let name = name?.unwrap();
-        let percent_discount = percent_discount?;
-        let original_price = original_price?;
-        let price = price?;
-
-        Ok(PriceInfo {
-            name,
-            is_dlc,
-            percent_discount: percent_discount
-                .trim_start_matches("-")
-                .trim_end_matches("%")
-                .parse::<u64>()?,
-            original_price: original_price.trim_start_matches("$").parse::<f64>()?,
-            price: price.trim_start_matches("$").parse::<f64>()?,
-        })
+impl Default for QueryParams {
+    fn default() -> Self {
+        Self {
+            limit: 48,
+            release_statuses: None,
+            languages: "in:en",
+            order: "desc:trending",
+            discounted: "eq:false",
+            product_type: "in:game,pack,dlc,extras",
+            page: 1,
+            country_code: "US",
+            locale: "en-US",
+            currency_code: "USD",
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PriceInfo {
-    pub name: String,
-    pub is_dlc: bool,
-    pub percent_discount: u64,
-    pub original_price: f64,
-    pub price: f64,
+impl QueryParams {
+    const BASE_URL: &'static str = "https://catalog.gog.com/v1/catalog";
+
+    fn product_type(&mut self, product_type: &ProductType) -> &mut Self {
+        match product_type {
+            ProductType::Game => self.product_type = "in:game",
+            ProductType::Pack => self.product_type = "in:pack",
+            ProductType::Dlc => self.product_type = "in:dlc",
+            ProductType::Extras => self.product_type = "in:extras",
+            ProductType::GamePack => self.product_type = "in:game,pack",
+            ProductType::DlcExtras => self.product_type = "in:dlc,extras",
+            ProductType::All => self.product_type = "in:game,pack,dlc,extras",
+        }
+        self
+    }
+
+    fn download_kind(&mut self, kind: &DownloadKind) -> &mut Self {
+        match kind {
+            DownloadKind::Discounted => self.discounted = "eq:true",
+            DownloadKind::NotDiscounted => self.discounted = "eq:false",
+            DownloadKind::New => self.release_statuses = Some("in:new-arrival"),
+        };
+        self
+    }
+
+    fn build(&self) -> String {
+        serde_urlencoded::to_string(self).expect("failed to serialize query params")
+    }
+
+    fn build_url(&self) -> String {
+        let mut s = String::new();
+        s.push_str(Self::BASE_URL);
+        s.push_str("?");
+        s.push_str(&self.build());
+        s
+    }
 }
 
-struct Links<T: IntoArcStr> {
-    on_sale: T,
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProductType {
+    Game,
+    Pack,
+    Dlc,
+    Extras,
+    GamePack,
+    DlcExtras,
+    All,
 }
 
-struct Selectors<T: IntoArcStr> {
-    cookies_btn: T,
-    total_items: T,
-    total_pages: T,
-    content: T,
-    items: T,
-    button: T,
+impl Display for ProductType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Game => f.write_str("game"),
+            Self::Pack => f.write_str("pack"),
+            Self::Dlc => f.write_str("dlc"),
+            Self::Extras => f.write_str("extras"),
+            Self::GamePack => f.write_str("game_pack"),
+            Self::DlcExtras => f.write_str("dlc_extras"),
+            Self::All => f.write_str("all"),
+        }
+    }
+}
 
-    name: T,
-    is_dlc: T,
-    pct_discount: T,
-    original_price: T,
-    price: T,
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GogPagination {
+    pages: u64,
+    currently_shown_product_count: u64,
+    product_count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GogResponse {
+    pages: u64,
+    currently_shown_product_count: u64,
+    product_count: u64,
+    pub products: Vec<GogProduct>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GogProduct {
+    id: String,
+    slug: String,
+    #[serde(skip_deserializing)]
+    features: Vec<ProductFeature>,
+    #[serde(skip_deserializing)]
+    screenshots: Vec<String>,
+    #[serde(skip_deserializing)]
+    user_preferred_language: UserPreferredLanguage,
+    pub release_date: Option<String>,
+    store_release_date: String,
+    pub product_type: ProductType,
+    pub title: String,
+    #[serde(skip_deserializing)]
+    cover_horizontal: String,
+    #[serde(skip_deserializing)]
+    cover_vertical: String,
+    pub developers: Vec<String>,
+    pub publishers: Vec<String>,
+    operating_systems: Vec<String>,
+    pub price: ProductPrice,
+    product_state: String,
+    genres: Vec<ProductFeature>,
+    tags: Vec<ProductFeature>,
+    reviews_rating: u64,
+    #[serde(skip_deserializing)]
+    editions: Vec<ProductEdition>,
+    #[serde(skip_deserializing)]
+    ratings: Vec<ProductAgeRating>,
+    #[serde(skip_deserializing)]
+    store_link: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ProductFeature {
+    name: String,
+    slug: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename = "camelCase")]
+struct UserPreferredLanguage {
+    code: String,
+    in_audio: bool,
+    in_text: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductPrice {
+    pub r#final: String,
+    pub base: String,
+    pub discount: String,
+    pub final_money: FinalMoney,
+    pub base_money: BaseMoney,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct FinalMoney {
+    pub amount: String,
+    pub currency: String,
+    pub discount: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BaseMoney {
+    pub amount: String,
+    pub currency: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductEdition {
+    id: u64,
+    name: String,
+    is_root_edition: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProductAgeRating {
+    name: String,
+    age_rating: String,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn build_query_str() {
+        let mut params = QueryParams::default();
+        let s = params
+            .product_type(&ProductType::Extras)
+            .download_kind(&DownloadKind::NotDiscounted)
+            .build();
+        assert_eq!(
+            s,
+            "limit=48&languages=in%3Aen&order=desc%3Atrending&discounted=eq%3Afalse&productType=in%3Aextras&page=1&countryCode=US&locale=en-US&currencyCode=USD"
+        );
+    }
+
+    #[test]
+    fn build_url() {
+        let mut params = QueryParams::default();
+        let s = params
+            .product_type(&ProductType::Extras)
+            .download_kind(&DownloadKind::NotDiscounted)
+            .build_url();
+        assert_eq!(
+            s,
+            "https://catalog.gog.com/v1/catalog?limit=48&languages=in%3Aen&order=desc%3Atrending&discounted=eq%3Afalse&productType=in%3Aextras&page=1&countryCode=US&locale=en-US&currencyCode=USD"
+        );
+    }
+
+    #[test]
+    fn build_url_many() {
+        let mut params = QueryParams::default();
+        params
+            .product_type(&ProductType::Extras)
+            .download_kind(&DownloadKind::NotDiscounted);
+
+        for i in 1..=10 {
+            let url = params.build_url();
+
+            let expected = format!(
+                "https://catalog.gog.com/v1/catalog?limit=48&languages=in%3Aen&order=desc%3Atrending&discounted=eq%3Afalse&productType=in%3Aextras&page={}&countryCode=US&locale=en-US&currencyCode=USD",
+                i
+            );
+            assert_eq!(expected, url);
+            params.page += 1;
+        }
+    }
+
+    #[test]
+    fn deser() {
+        let s = std::fs::read_to_string("../../temp/gog_response.json")
+            .expect("failed to read temp/gog_response.json");
+        let deser = serde_json::from_str::<GogResponse>(&s);
+        if deser.is_err() {
+            println!("{:?}", deser);
+        }
+        assert_eq!(true, deser.is_ok());
+    }
 }

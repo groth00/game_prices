@@ -1,6 +1,6 @@
 # Introduction
 
-A game price scraper in Rust and Python
+A game price scraper written in Rust and Python
 
 - Fanatical
 - Gamebillet
@@ -11,7 +11,21 @@ A game price scraper in Rust and Python
 - Steam
 - Wingamestore
 
-For steam, an API key is needed. Some API endpoints are public, some are undocumented.
-The undocumented endpoints have been scraped by SteamDB
-and the protobuf files are available
-in [this repository](https://github.com/SteamDatabase/Protobufs/tree/master)
+# Requirements
+
+Rust
+- rustup
+
+Python
+- uv package manager
+  - lxml
+  - seleniumbase
+
+chromedriver
+
+
+# Notes
+
+For steam, an API key is needed (set STEAM_API_KEY environment variable)  
+Some API endpoints are public, some are undocumented (via SteamDB)  
+The SteamDB protobuf files are available in [this repository](https://github.com/SteamDatabase/Protobufs/tree/master)  

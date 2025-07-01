@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import time
 
 from seleniumbase import SB
@@ -35,7 +36,14 @@ class Gamesplanet:
         output_path = f"{self.output_dir}/on_sale_{now}.json"
         f = open(output_path, "w")
 
-        with SB(uc=True, undetectable=True, ad_block_on=True, locale="en") as sb:
+        with SB(
+            uc=True,
+            undetectable=True,
+            ad_block_on=True,
+            locale="en",
+            disable_js=True,
+            block_images=True,
+        ) as sb:
             sb.activate_cdp_mode(self.url)
             sb.uc_gui_click_captcha()
             sb.cdp.sleep(2)
@@ -49,7 +57,7 @@ class Gamesplanet:
 
                 output = []
 
-                sb.cdp.sleep(2)
+                sb.cdp.sleep(1.1 + random.random())
 
                 items = sb.cdp.select_all(self.css_item)
                 for item in items:

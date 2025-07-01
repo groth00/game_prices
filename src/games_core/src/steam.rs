@@ -813,20 +813,18 @@ impl Steam {
         Ok(())
     }
 
-    /// when updating appinfo, use the last row of apps.jsonl
+    /// fetch_appids gives the list of appids, now we fetch game metadata from appids
+    /// if we find an appinfo_*.jsonl file, this means we've already processed the initial set of
+    /// appids
+    /// so we use the last line of the appids file, which contains the most recently changed appids
     pub async fn fetch_appinfo(&self) -> Result<(), Error> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let mut seen = BTreeSet::new();
         let mut appids = Vec::with_capacity(8192);
 
         let appids_str = fs::read_to_string(&self.path_appids).await?;
 
-        let output_path = if fs::try_exists("output/steam/appinfo.jsonl").await? {
-            "output/steam/appinfo_latest.jsonl"
-        } else {
-            "output/steam/appinfo.jsonl"
-        };
-
-        if output_path == "output/steam/appinfo_latest.jsonl" {
+        if let Ok(Some(_appinfo)) = crate::utils::latest_file("output/backup/steam", "appinfo") {
             info!("using last line of appids for update");
             let last_line = appids_str.lines().nth_back(0).expect("empty apps.jsonl");
             let info = serde_json::from_str::<Apps>(last_line)?;
@@ -853,6 +851,7 @@ impl Steam {
             }
         }
 
+        let output_path = format!("output/steam/appinfo_{}.jsonl", now);
         let outfile = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -892,24 +891,24 @@ impl Steam {
             let request_vec = request_template.encode_to_vec();
             let encoded = BASE64_STANDARD.encode(&request_vec);
 
-            let bytes = self
-                .client
-                .request(Method::GET, self.links.browse)
-                .query(&[
+            let resp = retry(
+                &self.client,
+                Method::GET,
+                self.links.browse,
+                &[
                     ("key", self.api_key.to_string()),
                     ("input_protobuf_encoded", encoded),
-                ])
-                .send()
-                .await?
-                .bytes()
-                .await?;
+                ],
+            )
+            .await?;
+            let bytes = resp.bytes().await?;
 
             let decoded = CStoreBrowseGetItemsResponse::decode(bytes)?;
             let serialized = serde_json::to_string(&decoded)?;
             writer.write_all(serialized.as_bytes()).await?;
             writer.write_u8(b'\n').await?;
 
-            sleep(Duration::from_millis(500)).await;
+            sleep(Duration::from_millis(750)).await;
         }
 
         writer.flush().await?;
@@ -917,11 +916,21 @@ impl Steam {
         Ok(())
     }
 
-    // steam_deck_compat_category / steam_os_compat_category: 1 = unsupported
+    // NOTE: steam_deck_compat_category / steam_os_compat_category: 1 = unsupported
     pub async fn fetch_appids(&self) -> Result<(), Error> {
-        let last_time = match fs::metadata(&self.path_appids).await {
-            Ok(meta) => {
-                let last_time = meta.modified()?.duration_since(UNIX_EPOCH)?.as_secs() as u32;
+        let last_time = match fs::try_exists(&self.path_appids).await {
+            Ok(_) => {
+                let appids_str = fs::read_to_string(&self.path_appids).await?;
+                let last_line = appids_str.lines().nth_back(0).expect("empty apps.jsonl");
+                let info = serde_json::from_str::<Apps>(last_line)?;
+                let mut times = info
+                    .response
+                    .apps
+                    .iter()
+                    .map(|app: &App| app.last_modified)
+                    .collect::<Vec<_>>();
+                times.sort_by(|a1, a2| a2.cmp(a1));
+                let last_time = times[0];
                 info!("last_time: {}", last_time);
                 Some(last_time)
             }
@@ -1135,6 +1144,7 @@ struct AppsResponse {
 #[derive(Debug, Deserialize)]
 struct App {
     appid: u32,
+    last_modified: u32,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,4 +1,5 @@
 DROP TABLE IF EXISTS prices;
+
 CREATE TABLE IF NOT EXISTS prices(
   meta_id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
@@ -9,12 +10,27 @@ CREATE TABLE IF NOT EXISTS prices(
   gog_price REAL,
   indiegala_price REAL,
   steam_price REAL,
-  wgs_price REAL
+  wgs_price REAL,
+  is_dlc INTEGER,
+  tags TEXT,
+  categories_player TEXT,
+  categories_controller TEXT,
+  categories_features TEXT,
+  review_count INTEGER,
+  review_pct_positive INTEGER,
+  release_date INTEGER,
+  windows INTEGER,
+  mac INTEGER,
+  linux INTEGER,
+  steam_deck_compat INTEGER,
+  FOREIGN KEY(meta_id) REFERENCES metadata(id)
 );
 
 INSERT INTO prices(
   meta_id, name, fanatical_price, gamebillet_price, gamesplanet_price,
-  gmg_price, gog_price, indiegala_price, steam_price, wgs_price
+  gmg_price, gog_price, indiegala_price, steam_price, wgs_price,
+  is_dlc, review_count, review_pct_positive, release_date,
+  windows, mac, linux, steam_deck_compat
 )
 SELECT metadata.id, metadata.name,
   s1.discount_price AS fanatical_price,
@@ -24,7 +40,9 @@ SELECT metadata.id, metadata.name,
   s5.discount_price AS gog_price,
   s6.discount_price AS indiegala_price,
   s7.discount_price AS steam_price,
-  s8.discount_price AS wgs_price
+  s8.discount_price AS wgs_price,
+  metadata.is_dlc, metadata.review_count, metadata.review_pct_positive, metadata.release_date,
+  metadata.windows, metadata.mac, metadata.linux, metadata.steam_deck_compat
 FROM
   metadata LEFT JOIN (
     SELECT meta_id, discount_price

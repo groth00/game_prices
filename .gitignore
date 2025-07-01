@@ -14,3 +14,9 @@ __pycache__/
 flamegraph*.svg
 games.db
 todo.txt
+
+# experiments
+sbase/args.py
+sbase/disable_urls.py
+sbase/normalize.py
+sbase/steam.py
