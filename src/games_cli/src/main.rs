@@ -3,11 +3,13 @@ use std::{process::Stdio, time::Duration};
 use anyhow::Error;
 use clap::{Parser, Subcommand};
 use env_logger::Builder;
-use log::{LevelFilter, info};
+use log::{LevelFilter, error, info};
 use reqwest::Client;
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
-    process, time,
+    join, process,
+    task::JoinError,
+    time,
 };
 
 use games_core::{
@@ -20,7 +22,7 @@ use games_core::{
     wgs::{self, Wgs},
 };
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<(), Error> {
     Builder::new().filter_level(LevelFilter::Info).init();
 
@@ -29,13 +31,87 @@ async fn main() -> Result<(), Error> {
     let args = Args::parse();
 
     match &args.command {
+        Commands::Fanatical { action } => {
+            let fanatical = Fanatical::default();
+
+            use FanaticalCmd::*;
+            match action {
+                Bundles => fanatical.bundles().await?,
+                OnSale => fanatical.download(true).await?,
+                All => fanatical.download(false).await?,
+                New => fanatical.new_releases().await?,
+                Sitemaps => fanatical.sitemaps().await?,
+            }
+        }
+        Commands::Gamebillet { action } => {
+            use GamebilletCmd::*;
+            match action {
+                OnSale => run_python(Retailer::GamebilletSale).await?,
+                All => run_python(Retailer::GamebilletAll).await?,
+                Sitemap => run_python(Retailer::GamebilletSitemap).await?,
+                ParseSitemap => Gamebillet::parse_sitemap().await?,
+            }
+        }
+        Commands::Gamesplanet { action } => {
+            use GamesplanetCmd::*;
+
+            match action {
+                All => run_python(Retailer::Gamesplanet).await?,
+            }
+        }
+        Commands::Gmg { action } => {
+            let gmg = Gmg::default();
+
+            use GmgCmd::*;
+            match action {
+                OnSale => gmg.download(gmg::DownloadKind::OnSale).await?,
+                All => gmg.download(gmg::DownloadKind::All).await?,
+                New => gmg.download(gmg::DownloadKind::New).await?,
+            }
+        }
+        Commands::Gog { action } => {
+            let gog = Gog::default();
+
+            use GogCmd::*;
+            match action {
+                OnSale => {
+                    gog.download(gog::ProductType::All, gog::DownloadKind::Discounted)
+                        .await?
+                }
+                All => {
+                    gog.download(gog::ProductType::GamePack, gog::DownloadKind::NotDiscounted)
+                        .await?;
+                    gog.download(
+                        gog::ProductType::DlcExtras,
+                        gog::DownloadKind::NotDiscounted,
+                    )
+                    .await?;
+                }
+                New => {
+                    gog.download(gog::ProductType::All, gog::DownloadKind::New)
+                        .await?
+                }
+            }
+        }
+        Commands::Indiegala { action } => {
+            use IndiegalaCmd::*;
+
+            match action {
+                All => run_python(Retailer::IndiegalaAll).await?,
+                OnSale => run_python(Retailer::IndiegalaSale).await?,
+                Bundles => run_python(Retailer::IndiegalaBundles).await?,
+                Parse => indiegala::parse_files().await?,
+            }
+        }
         Commands::Steam { action } => {
             let steam = Steam::default();
+
+            use SteamCmd::*;
             match action {
-                SteamCmd::Apps => steam.fetch_appids().await?,
-                SteamCmd::AppInfo => steam.fetch_appinfo().await?,
-                SteamCmd::Bundles => steam.bundles().await?,
-                SteamCmd::Charts => {
+                Apps => steam.fetch_appids().await?,
+                AppInfo => steam.fetch_appinfo().await?,
+                Bundles => steam.bundles().await?,
+                Charts => {
                     info!("STEAM: fetching top_releases");
                     steam.top_releases().await?;
                     time::sleep(Duration::from_secs(1)).await;
@@ -59,87 +135,68 @@ async fn main() -> Result<(), Error> {
                     info!("STEAM: fetching weekly_top");
                     steam.weekly_top(None).await?;
                 }
-                SteamCmd::ComingSoon => steam.coming_soon().await?,
-                SteamCmd::Ids => {
+                ComingSoon => steam.coming_soon().await?,
+                Ids => {
                     steam.tags().await?;
                     steam.categories().await?;
                 }
-                SteamCmd::MostWishlisted => steam.most_wishlisted().await?,
-                SteamCmd::News { appid } => steam.news(*appid).await?,
-                SteamCmd::OnSale => steam.on_sale().await?,
-                SteamCmd::Wishlist => steam.wishlist(false).await?,
-                SteamCmd::WishlistOnSale => steam.wishlist(true).await?,
+                MostWishlisted => steam.most_wishlisted().await?,
+                News { appid } => steam.news(*appid).await?,
+                OnSale => steam.on_sale().await?,
+                Wishlist => steam.wishlist(false).await?,
+                WishlistOnSale => steam.wishlist(true).await?,
             }
         }
-        Commands::Fanatical { action } => {
-            let fanatical = Fanatical::default();
-            match action {
-                FanaticalCmd::Bundles => fanatical.bundles().await?,
-                FanaticalCmd::OnSale => fanatical.download(true).await?,
-                FanaticalCmd::All => fanatical.download(false).await?,
-                FanaticalCmd::New => fanatical.new_releases().await?,
-                FanaticalCmd::Sitemaps => fanatical.sitemaps().await?,
-            }
-        }
-        Commands::Indiegala { action } => match action {
-            IndiegalaCmd::All => run_python(Retailer::IndiegalaAll).await?,
-            IndiegalaCmd::OnSale => run_python(Retailer::IndiegalaSale).await?,
-            IndiegalaCmd::Bundles => run_python(Retailer::IndiegalaBundles).await?,
-            IndiegalaCmd::Parse => indiegala::parse_files().await?,
-        },
         Commands::Wingamestore { action } => {
             let wgs = Wgs::default();
+
+            use WingamestoreCmd::*;
             match action {
-                WingamestoreCmd::OnSale => {
-                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::OnSale)).await?
-                }
-                WingamestoreCmd::All => {
-                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::All)).await?
-                }
-                WingamestoreCmd::New => {
-                    run_with_chromedriver(|| wgs.download(wgs::DownloadKind::New)).await?
-                }
+                OnSale => run_with_chromedriver(|| wgs.download(wgs::DownloadKind::OnSale)).await?,
+                All => run_with_chromedriver(|| wgs.download(wgs::DownloadKind::All)).await?,
+                New => run_with_chromedriver(|| wgs.download(wgs::DownloadKind::New)).await?,
             }
         }
-        Commands::Gog { action } => {
-            let gog = Gog::default();
-            match action {
-                GogCmd::OnSale => {
-                    gog.download(gog::ProductType::All, gog::DownloadKind::Discounted)
-                        .await?
-                }
-                GogCmd::All => {
-                    gog.download(gog::ProductType::GamePack, gog::DownloadKind::NotDiscounted)
-                        .await?;
-                    gog.download(
-                        gog::ProductType::DlcExtras,
-                        gog::DownloadKind::NotDiscounted,
-                    )
-                    .await?;
-                }
-                GogCmd::New => {
-                    gog.download(gog::ProductType::All, gog::DownloadKind::New)
-                        .await?
-                }
-            }
-        }
-        Commands::Gamebillet { action } => match action {
-            GamebilletCmd::OnSale => run_python(Retailer::GamebilletSale).await?,
-            GamebilletCmd::All => run_python(Retailer::GamebilletAll).await?,
-            GamebilletCmd::ParseSitemap => Gamebillet::parse_sitemap().await?,
-        },
-        Commands::Gmg { action } => {
+        Commands::Api { action } => {
+            let fanatical = Fanatical::default();
             let gmg = Gmg::default();
+            let gog = Gog::default();
+            let steam = Steam::default();
+
+            use ApiCmd::*;
 
             match action {
-                GmgCmd::OnSale => gmg.download(gmg::DownloadKind::OnSale).await?,
-                GmgCmd::All => gmg.download(gmg::DownloadKind::All).await?,
-                GmgCmd::New => gmg.download(gmg::DownloadKind::New).await?,
+                OnSale => {
+                    let h1 = tokio::spawn(async move { fanatical.download(true).await });
+                    let h2 =
+                        tokio::spawn(async move { gmg.download(gmg::DownloadKind::OnSale).await });
+                    let h3 = tokio::spawn(async move {
+                        gog.download(gog::ProductType::All, gog::DownloadKind::Discounted)
+                            .await
+                    });
+                    let h4 = tokio::spawn(async move { steam.on_sale().await });
+                    let (res1, res2, res3, res4) = join!(h1, h2, h3, h4);
+                    task_status(res1, res2, res3, res4).await;
+                }
             }
         }
-        Commands::Gamesplanet { action } => match action {
-            GamesplanetCmd::All => run_python(Retailer::Gamesplanet).await?,
-        },
+        Commands::Browser { action } => {
+            let wgs = Wgs::default();
+
+            use BrowserCmd::*;
+            match action {
+                OnSale => {
+                    let h1 =
+                        tokio::spawn(async move { run_python(Retailer::GamebilletSale).await });
+                    let h2 = tokio::spawn(async move { run_python(Retailer::Gamesplanet).await });
+                    let h3 = tokio::spawn(async move { run_python(Retailer::IndiegalaSale).await });
+                    let h4 =
+                        tokio::spawn(async move { wgs.download(wgs::DownloadKind::OnSale).await });
+                    let (res1, res2, res3, res4) = join!(h1, h2, h3, h4);
+                    task_status(res1, res2, res3, res4).await;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -178,7 +235,7 @@ async fn wait_for_chromedriver(client: &Client) -> Result<(), Error> {
             }
             Err(_) => (),
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
         attempts += 1;
     }
 
@@ -210,9 +267,32 @@ async fn run_python(retailer: Retailer) -> Result<(), Error> {
     Ok(())
 }
 
+type TaskResult = Result<Result<(), Error>, JoinError>;
+async fn task_status(res1: TaskResult, res2: TaskResult, res3: TaskResult, res4: TaskResult) {
+    let mut errors = vec![];
+
+    if let Err(e) = res1 {
+        errors.push(e);
+    }
+    if let Err(e) = res2 {
+        errors.push(e);
+    }
+    if let Err(e) = res3 {
+        errors.push(e);
+    }
+    if let Err(e) = res4 {
+        errors.push(e);
+    }
+    if !errors.is_empty() {
+        error!("{:?}", errors);
+    }
+    info!("all good");
+}
+
 enum Retailer {
     GamebilletSale,
     GamebilletAll,
+    GamebilletSitemap,
     Gamesplanet,
     IndiegalaSale,
     IndiegalaAll,
@@ -224,6 +304,7 @@ impl Retailer {
         match self {
             Self::GamebilletSale => ["gamebillet", "--sale"],
             Self::GamebilletAll => ["gamebillet", "--all"],
+            Self::GamebilletSitemap => ["gamebillet", "--sitemap"],
             Self::Gamesplanet => ["gamesplanet", "--steam"],
             Self::IndiegalaSale => ["indiegala", "--sale"],
             Self::IndiegalaAll => ["indiegala", "--all"],
@@ -242,43 +323,114 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// fetch data via undocumented APIs
-    Steam {
-        #[command(subcommand)]
-        action: SteamCmd,
-    },
-    /// fetch data via scraping with thirtyfour
     Fanatical {
         #[command(subcommand)]
         action: FanaticalCmd,
+    },
+    Gamebillet {
+        #[command(subcommand)]
+        action: GamebilletCmd,
+    },
+    Gamesplanet {
+        #[command(subcommand)]
+        action: GamesplanetCmd,
+    },
+    Gmg {
+        #[command(subcommand)]
+        action: GmgCmd,
+    },
+    Gog {
+        #[command(subcommand)]
+        action: GogCmd,
     },
     /// fetch data via RSS feeds
     Indiegala {
         #[command(subcommand)]
         action: IndiegalaCmd,
     },
-    /// fetch data via scraping with thirtyfour
+    Steam {
+        #[command(subcommand)]
+        action: SteamCmd,
+    },
     Wingamestore {
         #[command(subcommand)]
         action: WingamestoreCmd,
     },
-    /// fetch data via scraping with thirtyfour
-    Gog {
+    /// fetch data from stores that use APIs
+    Api {
         #[command(subcommand)]
-        action: GogCmd,
+        action: ApiCmd,
     },
-    Gamebillet {
+    /// fetch data from stores that require a browser
+    Browser {
         #[command(subcommand)]
-        action: GamebilletCmd,
+        action: BrowserCmd,
     },
-    Gmg {
-        #[command(subcommand)]
-        action: GmgCmd,
-    },
-    Gamesplanet {
-        #[command(subcommand)]
-        action: GamesplanetCmd,
-    },
+}
+
+#[derive(Subcommand, Debug)]
+#[group(multiple = false)]
+enum FanaticalCmd {
+    /// download and process all sitemaps
+    Sitemaps,
+    /// fetch prices for all games on sale
+    OnSale,
+    /// fetch prices for all games
+    All,
+    /// fetch prices and info for all bundles
+    Bundles,
+    /// get new titles since previous run of New/All
+    New,
+}
+
+#[derive(Subcommand)]
+enum GamebilletCmd {
+    /// fetch from /hotdeals
+    OnSale,
+    /// fetch from /allproducts
+    All,
+    /// fetch sitemap.xml
+    Sitemap,
+    /// todo
+    ParseSitemap,
+}
+
+#[derive(Subcommand)]
+enum GamesplanetCmd {
+    /// fetch prices for all steam drm games
+    All,
+}
+
+#[derive(Subcommand)]
+enum GmgCmd {
+    /// fetch prices for all games on sale
+    OnSale,
+    /// fetch prices for all games
+    All,
+    /// fetch info on new releases
+    New,
+}
+
+#[derive(Subcommand)]
+enum GogCmd {
+    /// fetch prices for all games on sale
+    OnSale,
+    /// fetches all games by iterating over game, pack, dlc, extras
+    All,
+    /// fetches info on new games
+    New,
+}
+
+#[derive(Subcommand)]
+enum IndiegalaCmd {
+    /// fetch XML for all games on sale
+    OnSale,
+    /// fetch XML for all games
+    All,
+    /// fetch bundles
+    Bundles,
+    /// parse XML files
+    Parse,
 }
 
 #[derive(Subcommand, Debug)]
@@ -308,33 +460,6 @@ enum SteamCmd {
     WishlistOnSale,
 }
 
-#[derive(Subcommand, Debug)]
-#[group(multiple = false)]
-enum FanaticalCmd {
-    /// download and process all sitemaps
-    Sitemaps,
-    /// fetch prices for all games on sale
-    OnSale,
-    /// fetch prices for all games
-    All,
-    /// fetch prices and info for all bundles
-    Bundles,
-    /// get new titles since previous run of New/All
-    New,
-}
-
-#[derive(Subcommand)]
-enum IndiegalaCmd {
-    /// fetch XML for all games on sale
-    OnSale,
-    /// fetch XML for all games
-    All,
-    /// fetch bundles
-    Bundles,
-    /// parse XML files
-    Parse,
-}
-
 #[derive(Subcommand)]
 enum WingamestoreCmd {
     /// fetch prices for all games on sale
@@ -346,37 +471,11 @@ enum WingamestoreCmd {
 }
 
 #[derive(Subcommand)]
-enum GogCmd {
-    /// fetch prices for all games on sale
+enum ApiCmd {
     OnSale,
-    /// fetches all games by iterating over game, pack, dlc, extras
-    All,
-    /// fetches info on new games
-    New,
 }
 
 #[derive(Subcommand)]
-enum GamebilletCmd {
-    /// fetch from /hotdeals
+enum BrowserCmd {
     OnSale,
-    /// fetch from /allproducts
-    All,
-    /// todo
-    ParseSitemap,
-}
-
-#[derive(Subcommand)]
-enum GmgCmd {
-    /// fetch prices for all games on sale
-    OnSale,
-    /// fetch prices for all games
-    All,
-    /// fetch info on new releases
-    New,
-}
-
-#[derive(Subcommand)]
-enum GamesplanetCmd {
-    /// fetch prices for all steam drm games
-    All,
 }

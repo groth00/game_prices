@@ -12,14 +12,15 @@ use rusqlite::{Connection, Result, config::DbConfig};
 use crate::{
     bundles::import_bundles,
     insert::{
-        import_prices, init_steam_map, update_search_table, update_steam_map,
-        update_steam_metadata, upsert_names,
+        import_prices, init_steam_map, update_steam_map, update_steam_metadata, upsert_names,
     },
+    search::{insert_wishlist, read_wishlist, update_search_table},
     utils::{execute_sql, move_file, rows_inserted},
 };
 
 mod bundles;
 mod insert;
+mod search;
 mod utils;
 
 const STORE_NAMES: [&'static str; 8] = [
@@ -43,14 +44,6 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Commands {
-    Import {
-        #[command(subcommand)]
-        action: ImportCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum ImportCmd {
     /// create metadata and price tables and indexes
     CreateTables,
     /// init map of name to steam appids from appinfo.jsonl
@@ -68,6 +61,9 @@ enum ImportCmd {
     ImportBundles,
     /// merge all price tables with latest information
     UpdateSearchTable,
+
+    /// get prices for items in steam wishlist (need output/steam/wishlist.json)
+    Wishlist,
 
     /// drop all tables
     DropTables,
@@ -88,30 +84,37 @@ fn main() -> Result<(), Error> {
     }
 
     match &args.command {
-        Commands::Import { action } => match action {
-            ImportCmd::CreateTables => create_tables(),
-            ImportCmd::InitSteamMap => init_steam_map(),
-            ImportCmd::UpdateSteamMap => update_steam_map(),
-            ImportCmd::UpdateNames => upsert_names(&mut conn),
-            ImportCmd::UpdateMetadata => update_steam_metadata(&mut conn),
-            ImportCmd::ImportPrices => import_prices(&mut conn),
-            ImportCmd::ImportBundles => import_bundles(&mut conn),
-            ImportCmd::UpdateSearchTable => update_search_table(&mut conn),
-            ImportCmd::DropTables => drop_tables(),
-            ImportCmd::Reset => {
-                move_from_backup()?;
-                drop_tables()?;
-                create_tables()?;
-                init_steam_map()?;
-                update_steam_map()?;
-                upsert_names(&mut conn)?;
-                update_steam_metadata(&mut conn)?;
-                import_prices(&mut conn)?;
-                import_bundles(&mut conn)?;
-                update_search_table(&mut conn)?;
-                Ok(())
+        Commands::CreateTables => create_tables(),
+        Commands::InitSteamMap => init_steam_map(),
+        Commands::UpdateSteamMap => update_steam_map(),
+        Commands::UpdateNames => upsert_names(&mut conn),
+        Commands::UpdateMetadata => update_steam_metadata(&mut conn),
+        Commands::ImportPrices => import_prices(&mut conn),
+        Commands::ImportBundles => import_bundles(&mut conn),
+        Commands::UpdateSearchTable => update_search_table(&mut conn),
+        Commands::DropTables => drop_tables(),
+        Commands::Wishlist => {
+            insert_wishlist(&mut conn)?;
+            let wishlist = read_wishlist(&mut conn)?;
+
+            for item in wishlist {
+                println!("{:?}", item);
             }
-        },
+            Ok(())
+        }
+        Commands::Reset => {
+            move_from_backup()?;
+            drop_tables()?;
+            create_tables()?;
+            init_steam_map()?;
+            update_steam_map()?;
+            upsert_names(&mut conn)?;
+            update_steam_metadata(&mut conn)?;
+            import_prices(&mut conn)?;
+            import_bundles(&mut conn)?;
+            update_search_table(&mut conn)?;
+            Ok(())
+        }
     }?;
 
     Ok(())

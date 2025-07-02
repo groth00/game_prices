@@ -24,18 +24,6 @@ class Bundle:
         self.active_until = active_until
 
 
-# {
-#     "price": 3.99,
-#     "name": "Tiny Beat Bundle",
-#     "games": [
-#         {"name": "Idle Catfarmia", "developer": "RainbowStudio"},
-#         {"name": "YinYang Street Ultimate Edition", "developer": "CubeGame"},
-#         {"name": "Heartless & Dreadful: Return by 72 Hours", "developer": "Kirillian"}
-#     ],
-#     "active_until": "2025/06/18 14:00:00"
-# }
-
-
 class Indiegala:
     output_dir = "output/indiegala"
 
@@ -55,7 +43,9 @@ class Indiegala:
 
         bundles = []
 
-        with SB(uc=True, undetectable=True, ad_block_on=True, locale="en") as sb:
+        with SB(
+            uc=True, undetectable=True, ad_block_on=True, block_images=True, locale="en"
+        ) as sb:
             sb.activate_cdp_mode(self.url_bundles)
             sb.sleep(2)
 

@@ -17,3 +17,5 @@ DROP TABLE IF EXISTS metadata;
 DROP TABLE IF EXISTS bundles_fanatical;
 DROP TABLE IF EXISTS bundles_steam;
 DROP TABLE IF EXISTS bundles_indiegala;
+
+DROP TABLE IF EXISTS steam_wishlist;

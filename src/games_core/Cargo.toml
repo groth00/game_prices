@@ -21,7 +21,7 @@ thirtyfour = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
-  "rt",
+  "rt-multi-thread",
   "fs",
   "time",
   "process",

@@ -11,6 +11,7 @@ class Gamebillet:
 
     url = "https://www.gamebillet.com/allproducts?drm=74"  # steam
     url_on_sale = "https://www.gamebillet.com/hotdeals?drm=74"
+    url_sitemap = "https://www.gamebillet.com/sitemap.xml"
 
     css_item = ".grid-item--card"
 
@@ -24,6 +25,17 @@ class Gamebillet:
 
     def on_sale(self):
         self.download("on_sale", self.url_on_sale)
+
+    def sitemap(self):
+        now = time.clock_gettime(time.CLOCK_REALTIME)
+        output_path = f"{self.output_dir}/sitemap_{now}.xml"
+
+        with SB(uc=True, undetectable=True, locale="en") as sb:
+            sb.activate_cdp_mode(self.url_sitemap)
+            sb.sleep(2)
+            page_source = sb.cdp.get_page_source()
+            with open(output_path, "w") as f:
+                f.write(page_source)
 
     def download(self, output_prefix: str, url: str):
         os.makedirs(self.output_dir, exist_ok=True)

@@ -1,4 +1,8 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Error;
 use chrono::{Days, Local, NaiveDate};
@@ -6,19 +10,23 @@ use log::{error, info};
 use quick_xml::{events::Event, reader::Reader};
 use tokio::fs;
 
+use crate::utils::{latest_file, move_file};
+
+const OUTPUT_DIR: &str = "output/gamebillet";
+
 #[derive(Default)]
 pub struct Gamebillet {}
 
 impl Gamebillet {
     pub async fn parse_sitemap() -> Result<(), Error> {
-        let ignorelist = fs::read_to_string("gamebillet_ignorelist.txt")
+        let ignorelist = fs::read_to_string(PathBuf::from(OUTPUT_DIR).join("ignorelist.txt"))
             .await
-            .expect("failed to open gamebillet_ignorelist.txt");
+            .expect("failed to open ignorelist");
         let ignore_set = ignorelist.split_whitespace().collect::<HashSet<_>>();
 
-        let input_path = "gamebillet_sitemap.xml";
-        let mut reader =
-            Reader::from_file(input_path).expect("failed to open gamebillet_sitemap.xml");
+        let input_path =
+            latest_file("output/gamebillet", "sitemap")?.expect("no sitemap.xml found");
+        let mut reader = Reader::from_file(&input_path).expect("failed to open sitemap");
 
         let mut buf = Vec::new();
         let mut state = XmlState::default();
@@ -86,9 +94,17 @@ impl Gamebillet {
                     .expect("date not in %Y-%m-%d format");
                 lastmod >= last_week
             })
+            .map(|&r| &r.loc)
             .collect::<Vec<_>>();
 
         info!("{} modified records (last 7 days)", recent.len());
+
+        let serialized = serde_json::to_string_pretty(&recent)?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let output_path = format!("{}/changed_{}.json", OUTPUT_DIR, now);
+        fs::write(output_path, serialized).await?;
+
+        move_file(&input_path, "gamebillet")?;
 
         Ok(())
     }

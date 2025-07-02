@@ -72,7 +72,7 @@ pub fn move_file(source: &PathBuf, store: &'static str) -> Result<(), Error> {
     dest.push(store);
     dest.push(source.file_name().expect("invalid filename"));
 
-    info!("mv {:?} -> {:?}", source.file_name(), &dest);
+    info!("mv {:?} -> {:?}", source.file_name().unwrap(), &dest);
     fs::rename(source, dest)?;
     Ok(())
 }

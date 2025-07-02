@@ -189,3 +189,9 @@ CREATE INDEX IF NOT EXISTS gog_cover ON gog(name, ts DESC, meta_id);
 CREATE INDEX IF NOT EXISTS indiegala_cover ON indiegala(name, ts DESC, meta_id);
 CREATE INDEX IF NOT EXISTS steam_cover ON steam(name, ts DESC, meta_id);
 CREATE INDEX IF NOT EXISTS wgs_cover ON wgs(name, ts DESC, meta_id);
+
+CREATE TABLE IF NOT EXISTS steam_wishlist(
+  id INTEGER PRIMARY KEY,
+  appid INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wishlist_appid ON steam_wishlist(appid);

@@ -14,7 +14,7 @@ use log::{error, info};
 use rusqlite::{Connection, Result, Statement, ToSql, named_params, params};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::{all_files, execute_sql, latest_file, move_file, normalize, rows_inserted};
+use crate::utils::{all_files, latest_file, move_file, normalize, rows_inserted};
 use games_core::{
     algolia, fanatical, gmg,
     gog::{self, GogResponse},
@@ -1186,71 +1186,6 @@ fn wgs_insert(mut ins: Inserter, data: PriceData, modified: u32) -> Result<(), E
     Ok(())
 }
 
-pub fn update_search_table(conn: &mut Connection) -> Result<(), Error> {
-    let tags_raw = fs::read_to_string("output/steam/tags.json")?;
-    let categories_raw = fs::read_to_string("output/steam/categories.json")?;
-
-    let tags_list: Tags = serde_json::from_str(&tags_raw)?;
-    let mut tags_map: HashMap<u32, String> = HashMap::new();
-    for tag in tags_list.response.tags {
-        tags_map.insert(tag.tagid, tag.name);
-    }
-    info!("created tags map");
-
-    let categories_list: Vec<Category> = serde_json::from_str(&categories_raw)?;
-    let mut categories_map: HashMap<u32, String> = HashMap::new();
-    for category in categories_list {
-        categories_map.insert(category.categoryid, category.display_name);
-    }
-    info!("created categories map");
-
-    execute_sql("src/importer/sql/insert_prices.sql")?;
-    info!("inserted into prices: {}", rows_inserted(conn, "prices")?);
-
-    let select_query = "SELECT rowid, tags, categories_player, categories_controller, categories_features FROM metadata WHERE tags IS NOT NULL AND categories_player IS NOT NULL AND categories_controller IS NOT NULL AND categories_features IS NOT NULL";
-    let update_query = "UPDATE prices SET tags = ?1, categories_player = ?2, categories_controller = ?3, categories_features = ?4 WHERE meta_id = ?5";
-
-    let tx = conn.transaction()?;
-    {
-        let mut select_stmt = tx.prepare(select_query)?;
-        let mut update_stmt = tx.prepare(update_query)?;
-
-        let mut rows = select_stmt.query([])?;
-        while let Ok(Some(r)) = rows.next() {
-            let rowid = r.get::<usize, i64>(0)?;
-            let mut ret: [String; 4] = [const { String::new() }; 4];
-            for i in 0..=3 {
-                let raw = r.get::<usize, Vec<u8>>(i + 1)?;
-                if raw.is_empty() {
-                    ret[i] = "None".into();
-                } else {
-                    let (data, _bytes): (Vec<u32>, usize) =
-                        bincode::decode_from_slice(&raw, config::standard())
-                            .expect("failed to deserialize tags");
-                    if i == 0 {
-                        ret[i] = data
-                            .into_iter()
-                            .map(|id| tags_map.get(&id).map_or("Unknown", |v| v))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                    } else {
-                        ret[i] = data
-                            .into_iter()
-                            .map(|id| categories_map.get(&id).map_or("Unknown", |v| v))
-                            .collect::<Vec<_>>()
-                            .join(",");
-                    }
-                }
-            }
-            update_stmt.execute(params![ret[0], ret[1], ret[2], ret[3], rowid])?;
-        }
-    }
-    tx.commit()?;
-    info!("updated tags and categories in prices table");
-
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct GamebilletPriceInfo {
     name: String,
@@ -1477,31 +1412,6 @@ struct PurchaseOption {
     purchase_option_name: Option<String>,
     packageid: Option<i32>,
     bundleid: Option<i32>,
-}
-
-#[derive(Deserialize)]
-struct Tags {
-    response: TagResponse,
-}
-
-#[derive(Deserialize)]
-struct TagResponse {
-    // version_hash: String,
-    tags: Vec<Tag>,
-}
-
-#[derive(Deserialize)]
-struct Tag {
-    tagid: u32,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct Category {
-    categoryid: u32,
-    // 0: type, 1: player, 2: features, 3: controller
-    // category_type: u32,
-    display_name: String,
 }
 
 #[derive(Deserialize)]

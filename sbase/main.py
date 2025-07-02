@@ -26,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     gamebillet.add_argument(
         "--sale", action="store_true", help="get all steam items from /hotdeals"
     )
+    gamebillet.add_argument(
+        "--sitemap", action="store_true", help="download sitemap.xml"
+    )
     gamebillet.set_defaults(func=do_gamebillet)
 
     gamesplanet = subparsers.add_parser("gamesplanet")
@@ -62,6 +65,9 @@ def do_gamebillet(args: argparse.Namespace):
     if args.all:
         print("--all")
         gamebillet.all()
+    if args.sitemap:
+        print("--sitemap")
+        gamebillet.sitemap()
 
 
 def do_gamesplanet(args: argparse.Namespace):

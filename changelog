@@ -1,3 +1,22 @@
+## 2025-07-02
+
+### Notes
+
+### Added
+- use tokio rt-multi-thread to download from stores in parallel
+	- all stores with APIs/all stores which use browsers
+	- might need to limit concurrency for browsers (currently launching 4)
+- add command to importer load steam wishlist and print prices across stores
+- download sitemap.xml for gamebillet
+	- probably not useful since gathering 20 items per page may be faster than
+	visiting 1 page at a time, even accounting for the small set of items that changed since the previous day
+
+### Changed
+
+### Removed
+- removed intermediate subcommand from importer
+
+
 ## 2025-07-01
 
 ### Notes
@@ -7,7 +26,7 @@
 
 ### Added
 - disabled js and images for gamebillet and gamesplanet downloaders
-	- sidenote: tried playwright but the stealth plugin wasn't effective
+	- tried playwright but the stealth plugin wasn't effective
 - process all files in importer instead of latest file only
 - automatically move files into backup dir after processing/importing for replay
 - import bundles for fanatical, steam, indiegala
@@ -24,7 +43,8 @@ truncating
 - extracted queries from source code to files and use include_str!
 - updated importer to insert additional columns for each downloader except
 gamebillet and gamesplanet
-	- attributes differ between stores (publisher, release_date, franchise, etc.
+	- attributes differ between stores (publisher, release_date, franchise,
+	etc.)
 - adjusted price ranges for gmg downloader due to algolia limit of 1000
 results
 - updated importer to to skip unreleased games from fanatical

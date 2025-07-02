@@ -81,3 +81,17 @@ enum RetryError {
     #[error("client error: {0}")]
     ClientError(#[from] reqwest::Error),
 }
+
+pub fn move_file(source: &PathBuf, store: &'static str) -> Result<(), Error> {
+    let mut dest = source.clone();
+
+    dest.pop();
+    dest.pop();
+    dest.push("backup");
+    dest.push(store);
+    dest.push(source.file_name().expect("invalid filename"));
+
+    info!("mv {:?} -> {:?}", source.file_name().unwrap(), &dest);
+    fs::rename(source, dest)?;
+    Ok(())
+}
